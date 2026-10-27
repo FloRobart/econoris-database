@@ -1,0 +1,7 @@
+.*
+*.log
+
+!.github
+!.gitignore
+!.dockerignore
+!.env.example

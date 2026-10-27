@@ -1,0 +1,45 @@
+services:
+  econoris-db:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - db_data:/var/lib/postgresql
+    ports:
+      - 127.0.0.1:${DB_PORT:-5432}:5432
+    networks:
+      - econoris-net
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME} || exit 1"]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+
+  # dbmate with the local db/ folder mounted
+  # Default command: apply pending migrations and regenerate db/schema.sql
+  econoris-migrate:
+    image: ghcr.io/amacneil/dbmate:2.36.0
+    environment:
+      DATABASE_URL: postgres://${DB_USER}:${DB_PASSWORD}@econoris-db:5432/${DB_NAME}?sslmode=disable
+    command: ["--wait", "up"]
+    volumes:
+      - ./db:/db
+    depends_on:
+      econoris-db:
+        condition: service_healthy
+    networks:
+      - econoris-net
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+
+volumes:
+  db_data:
+    name: ${DB_VOLUME_NAME:-econoris_db_data_dev}
+
+networks:
+  econoris-net:
+    name: econoris-net
+    driver: bridge

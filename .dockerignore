@@ -1,0 +1,3 @@
+# Only db/migrations is needed in the image
+*
+!db/migrations

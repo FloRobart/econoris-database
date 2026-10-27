@@ -1,0 +1,46 @@
+services:
+  econoris-db:
+    image: postgres:18
+    restart: always
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - db_data:/var/lib/postgresql
+    networks:
+      - econoris-net
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME} || exit 1"]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+
+  # One-shot service: applies pending migrations, then exits
+  econoris-migrate:
+    image: florobart/econoris-migrations:${MIGRATIONS_VERSION:-latest}
+    restart: "no"
+    environment:
+      DATABASE_URL: postgres://${DB_USER}:${DB_PASSWORD}@econoris-db:5432/${DB_NAME}?sslmode=disable
+    depends_on:
+      econoris-db:
+        condition: service_healthy
+    networks:
+      - econoris-net
+    user: "1800:1800"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  db_data:
+    name: ${DB_VOLUME_NAME:-econoris_db_data}
+
+networks:
+  econoris-net:
+    name: econoris-net
+    driver: bridge
