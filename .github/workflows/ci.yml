@@ -1,0 +1,26 @@
+# CI of the project: gitflow, quality and releases.
+# The same file for every project: FloRobart/github-ci detects the type of the project
+# and runs the right CI. See auto/README.md over there.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Every permission is needed, whatever the type of the project: GitHub checks the
+# permissions of every type CI before starting the run, even the ones that do not run.
+permissions:
+  contents: write       # tags, releases and release branches
+  packages: write       # Docker images on GHCR, npm packages on GitHub Packages
+  pull-requests: write  # release and back-merge pull requests
+  id-token: write       # npm trusted publishing of a library, without token
+
+jobs:
+  # Keep the job id "ci": the ruleset protected-branches.json expects checks named
+  # "ci / Project / ...".
+  ci:
+    uses: FloRobart/github-ci/.github/workflows/auto.yml@main
+    secrets: inherit
