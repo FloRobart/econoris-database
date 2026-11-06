@@ -41,6 +41,8 @@ econoris-database/
 - Chaque changement de schéma est un **fichier de migration** dans `db/migrations/`. Il contient une section `up` (appliquer) et une section `down` (annuler).
 - dbmate enregistre les migrations appliquées dans la table `schema_migrations`. `dbmate up` n'exécute **que** celles qui manquent, dans l'ordre de leur horodatage.
 - Chaque migration est exécutée dans une transaction : si elle échoue, rien n'est appliqué.
+- En production, l'API ne se connecte pas avec le propriétaire de la base, mais avec le rôle `econoris_api`, qui peut seulement lire et écrire les lignes des tables : ni modifier le schéma, ni toucher à la table `schema_migrations`. Une injection SQL dans l'API ne pourrait donc ni modifier le schéma ni exécuter de code sur le serveur.
+- Le service ponctuel `econoris-api-role` crée ce rôle, lui donne ses droits et applique le mot de passe de `secrets/api_db_password`. Il tourne à chaque déploiement, après les migrations : une nouvelle table est donc accessible à l'API sans rien faire de plus.
 
 # Règles à respecter
 
@@ -118,6 +120,8 @@ docker compose -f docker-compose.dev.yml down -v
 4. Adapter le serveur si nécessaire (repositories, schémas zod...).
 5. Commiter la migration **et** `db/schema.sql`. Le diff de `schema.sql` montre l'effet réel du changement.
 
+Une nouvelle table n'a pas besoin de `GRANT` pour l'API : `econoris-api-role` lui donne ses droits au déploiement suivant.
+
 Pour modifier une fonction ou un trigger, créer une nouvelle migration avec `CREATE OR REPLACE FUNCTION ...` dans `up`, et l'ancienne définition dans `down`.
 
 # Publier l'image de migrations
@@ -163,6 +167,8 @@ Prérequis, à préparer une seule fois :
         DATABASE_URL=postgres://<DB_USER>:<DB_PASSWORD>@econoris-database:5432/<DB_NAME>?sslmode=disable
         ```
 
+    - `secrets/api_db_password` : le mot de passe du rôle `econoris_api` de l'API, seul dans le fichier, avec des lettres et des chiffres uniquement.
+
     Le dossier protège les fichiers sur l'hôte. Les fichiers restent lisibles, car les conteneurs les lisent avec un utilisateur non-root :
 
     ```bash
@@ -170,15 +176,15 @@ Prérequis, à préparer une seule fois :
     ```
 
     ```bash
-    chmod 644 secrets/db_password secrets/migrations.env
+    chmod 644 secrets/db_password secrets/migrations.env secrets/api_db_password
     ```
 
 Déploiement :
 
-1. Sauvegarder la base :
+1. Sauvegarder la base. Sans les droits, qui nomment le rôle de l'API : il n'existe pas encore dans une base vide, et la restauration échouerait. `econoris-api-role` les redonne au déploiement suivant :
 
     ```bash
-    docker compose exec econoris-database pg_dump -U <DB_USER> -d <DB_NAME> > backup_$(date +%F).sql
+    docker compose exec econoris-database pg_dump --no-privileges -U <DB_USER> -d <DB_NAME> > backup_$(date +%F).sql
     ```
 
 2. Récupérer les images. La dernière release est prise par défaut ; pour une autre version, la définir dans `MIGRATIONS_VERSION` :
@@ -187,23 +193,23 @@ Déploiement :
     docker compose pull
     ```
 
-3. Démarrer. La base démarre, puis `econoris-migrate` applique **uniquement** les migrations manquantes et s'arrête :
+3. Démarrer. La base démarre, puis `econoris-migrate` applique **uniquement** les migrations manquantes et s'arrête. `econoris-api-role` donne ensuite au rôle de l'API ses droits et son mot de passe, puis s'arrête à son tour :
 
     ```bash
     docker compose up -d
     ```
 
-4. Vérifier que les migrations sont passées (le service doit être `Exited (0)`) :
+4. Vérifier que les migrations et le rôle de l'API sont passés (les deux services doivent être `Exited (0)`) :
 
     ```bash
     docker compose ps -a
     ```
 
     ```bash
-    docker compose logs econoris-migrate
+    docker compose logs econoris-migrate econoris-api-role
     ```
 
-5. Déployer ensuite le serveur, depuis son propre dossier.
+5. Déployer ensuite le serveur, depuis son propre dossier, avec `DB_USER=econoris_api` et le mot de passe de `secrets/api_db_password`.
 
 S'il n'y a aucune migration en attente, `econoris-migrate` ne fait rien. On peut relancer `docker compose up -d` autant de fois que nécessaire.
 
