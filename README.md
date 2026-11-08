@@ -6,7 +6,7 @@ Ce dépôt contient **tout ce qui concerne la base de données** d'Éconoris :
 - l'image Docker de migrations `florobart/econoris-migrations` ;
 - les fichiers Docker Compose pour lancer la base en développement et en production.
 
-Le serveur (`Econoris_server`) ne contient rien sur la base. Il se connecte simplement au réseau Docker `econoris-net` créé par ce dépôt.
+L'API (`econoris-api`) ne contient rien sur la base : elle s'y connecte par un réseau Docker. En production, c'est le réseau interne `econoris-database-net`, déclaré à l'identique dans les deux dépôts ; en développement, c'est `econoris-net`, créé par `docker-compose.dev.yml`.
 
 # Table des matières
 
@@ -36,10 +36,13 @@ econoris-database/
 
 # Principe
 
-- La base tourne sur l'image **officielle** `postgres:18`. La version majeure est fixée, car changer de version majeure rend le volume illisible sans migration des données.
+- En production, la base tourne sur l'image durcie `dhi.io/postgres:18` ; en développement, sur l'image officielle `postgres:18`. La version majeure est fixée, car changer de version majeure rend le volume illisible sans migration des données.
+- En production, les images de base sont épinglées par digest : mettre à jour Postgres, c'est changer ce digest dans `docker-compose.yml`. Sans cela, aucun correctif de sécurité n'est récupéré.
 - Chaque changement de schéma est un **fichier de migration** dans `db/migrations/`. Il contient une section `up` (appliquer) et une section `down` (annuler).
 - dbmate enregistre les migrations appliquées dans la table `schema_migrations`. `dbmate up` n'exécute **que** celles qui manquent, dans l'ordre de leur horodatage.
 - Chaque migration est exécutée dans une transaction : si elle échoue, rien n'est appliqué.
+- En production, l'API ne se connecte pas avec le propriétaire de la base, mais avec le rôle `econoris_api`, qui peut seulement lire et écrire les lignes des tables : ni modifier le schéma, ni toucher à la table `schema_migrations`. Une injection SQL dans l'API ne pourrait donc ni modifier le schéma ni exécuter de code sur le serveur.
+- Le service ponctuel `econoris-api-role` crée ce rôle, lui donne ses droits et applique le mot de passe de `secrets/api_db_password`. Il tourne à chaque déploiement, après les migrations : une nouvelle table est donc accessible à l'API sans rien faire de plus.
 
 # Règles à respecter
 
@@ -55,7 +58,7 @@ econoris-database/
 
 # Développement
 
-Copier le fichier d'environnement et l'adapter (`HOST_UID` et `HOST_GID` : résultats de `id -u` et `id -g`) :
+Copier le fichier d'environnement. Les variables de développement y sont commentées car elles ont une valeur par défaut : les décommenter seulement pour les changer (`HOST_UID` et `HOST_GID` : résultats de `id -u` et `id -g`).
 
 ```bash
 cp .env.example .env
@@ -117,21 +120,15 @@ docker compose -f docker-compose.dev.yml down -v
 4. Adapter le serveur si nécessaire (repositories, schémas zod...).
 5. Commiter la migration **et** `db/schema.sql`. Le diff de `schema.sql` montre l'effet réel du changement.
 
+Une nouvelle table n'a pas besoin de `GRANT` pour l'API : `econoris-api-role` lui donne ses droits au déploiement suivant.
+
 Pour modifier une fonction ou un trigger, créer une nouvelle migration avec `CREATE OR REPLACE FUNCTION ...` dans `up`, et l'ancienne définition dans `down`.
 
 # Publier l'image de migrations
 
 L'image `florobart/econoris-migrations` contient dbmate et toutes les migrations. Au démarrage, elle applique les migrations en attente, puis s'arrête.
 
-**Automatiquement (GitHub Actions)** : pousser un tag de version. Le workflow teste les migrations sur une base vide, puis publie l'image sur Docker Hub et GHCR avec les tags `<version>` et `latest`.
-
-```bash
-git tag v1.0.0
-```
-
-```bash
-git push origin v1.0.0
-```
+**Automatiquement (GitHub Actions)** : à chaque merge sur `main`, la CI teste les migrations sur une base vide, puis publie l'image sur Docker Hub et GHCR avec les tags `<version>` et `latest`.
 
 Les secrets `DOCKERHUB_USERNAME` et `DOCKERHUB_TOKEN` doivent être configurés dans le dépôt GitHub.
 
@@ -147,39 +144,72 @@ docker push --all-tags florobart/econoris-migrations
 
 # Déployer en production
 
-Sur le serveur, dans le dossier contenant le `docker-compose.yml` et le `.env` de ce dépôt.
+En production, `econoris-wrapper` déploie ce dépôt avec le reste de l'écosystème : il crée les secrets, sauvegarde la base, applique les migrations, puis démarre l'API. Voir son README.
 
-**Toujours déployer la base avant le serveur.** Le serveur a besoin du réseau `econoris-net` et du schéma à jour.
+Cette section décrit comment lancer ce dépôt seul, depuis le dossier contenant son `docker-compose.yml` et son `.env`.
 
-1. Sauvegarder la base :
+**Toujours déployer la base avant le serveur.** Le serveur a besoin du schéma à jour.
+
+Prérequis, à préparer une seule fois :
+
+- Le serveur doit être authentifié sur le registre des images durcies :
 
     ```bash
-    docker compose exec econoris-db pg_dump -U <DB_USER> -d <DB_NAME> > backup_$(date +%F).sql
+    docker login dhi.io
     ```
 
-2. Indiquer la version à déployer dans `.env` (`MIGRATIONS_VERSION=1.0.0`), puis récupérer les images :
+- Les secrets doivent exister dans le dossier `secrets/` (jamais commité) :
+
+    - `secrets/db_password` : le mot de passe de la base, seul dans le fichier ;
+    - `secrets/migrations.env` : une seule ligne, avec le mot de passe encodé pour une URL :
+
+        ```
+        DATABASE_URL=postgres://<DB_USER>:<DB_PASSWORD>@econoris-database:5432/<DB_NAME>?sslmode=disable
+        ```
+
+    - `secrets/api_db_password` : le mot de passe du rôle `econoris_api` de l'API, seul dans le fichier, avec des lettres et des chiffres uniquement.
+
+    Le dossier protège les fichiers sur l'hôte. Les fichiers restent lisibles, car les conteneurs les lisent avec un utilisateur non-root :
+
+    ```bash
+    chmod 700 secrets
+    ```
+
+    ```bash
+    chmod 644 secrets/db_password secrets/migrations.env secrets/api_db_password
+    ```
+
+Déploiement :
+
+1. Sauvegarder la base. Sans les droits, qui nomment le rôle de l'API : il n'existe pas encore dans une base vide, et la restauration échouerait. `econoris-api-role` les redonne au déploiement suivant :
+
+    ```bash
+    docker compose exec econoris-database pg_dump --no-privileges -U <DB_USER> -d <DB_NAME> > backup_$(date +%F).sql
+    ```
+
+2. Récupérer les images. La dernière release est prise par défaut ; pour une autre version, la définir dans `MIGRATIONS_VERSION` :
 
     ```bash
     docker compose pull
     ```
 
-3. Démarrer. La base démarre, puis `econoris-migrate` applique **uniquement** les migrations manquantes et s'arrête :
+3. Démarrer. La base démarre, puis `econoris-migrate` applique **uniquement** les migrations manquantes et s'arrête. `econoris-api-role` donne ensuite au rôle de l'API ses droits et son mot de passe, puis s'arrête à son tour :
 
     ```bash
     docker compose up -d
     ```
 
-4. Vérifier que les migrations sont passées (le service doit être `Exited (0)`) :
+4. Vérifier que les migrations et le rôle de l'API sont passés (les deux services doivent être `Exited (0)`) :
 
     ```bash
     docker compose ps -a
     ```
 
     ```bash
-    docker compose logs econoris-migrate
+    docker compose logs econoris-migrate econoris-api-role
     ```
 
-5. Déployer ensuite le serveur, depuis son propre dossier.
+5. Déployer ensuite le serveur, depuis son propre dossier, avec `DB_USER=econoris_api` et le mot de passe de `secrets/api_db_password`.
 
 S'il n'y a aucune migration en attente, `econoris-migrate` ne fait rien. On peut relancer `docker compose up -d` autant de fois que nécessaire.
 
@@ -193,19 +223,21 @@ S'il n'y a aucune migration en attente, `econoris-migrate` ne fait rien. On peut
 
 À faire **une seule fois**, sur une base créée avec l'ancien système (scripts dans `docker-entrypoint-initdb.d`). Les tables existent déjà, donc la migration `20261025120000_baseline` ne doit **pas** être exécutée. Il faut la marquer comme appliquée.
 
-1. Sauvegarder la base (voir [Déployer en production](#déployer-en-production)).
+⚠️ Le volume d'une base créée avec l'image officielle `postgres:18` **n'est pas réutilisable** : l'image durcie n'utilise ni le même dossier de données (`18/data` au lieu de `18/docker`) ni le même utilisateur (UID 70 au lieu de 999). Les données passent donc par une sauvegarde et une restauration, dans un nouveau volume.
 
-2. Vérifier la version de PostgreSQL utilisée. Elle doit être la même que celle de `docker-compose.yml` (`postgres:18`) :
+1. Sauvegarder la base, depuis le dossier de l'ancien `docker-compose.yml` :
+
+    ```bash
+    docker compose exec -T <SERVICE_DB> pg_dump -U <DB_USER> -d <DB_NAME> > backup.sql
+    ```
+
+2. Vérifier la version de PostgreSQL utilisée. Elle doit être la même que celle de `docker-compose.yml` (PostgreSQL 18) :
 
     ```sql
     SELECT version();
     ```
 
-3. Récupérer le nom du volume de données actuel et le mettre dans `DB_VOLUME_NAME` du `.env` de ce dépôt. Sinon, une nouvelle base vide est créée :
-
-    ```bash
-    docker volume ls
-    ```
+3. Indiquer dans `DB_VOLUME_NAME` du `.env` de ce dépôt un nom de volume **différent** de l'ancien. L'ancien volume reste intact et sert de solution de repli.
 
 4. Arrêter l'ancienne stack (sans `-v`, pour **garder** le volume), depuis le dossier de l'ancien `docker-compose.yml` :
 
@@ -216,22 +248,28 @@ S'il n'y a aucune migration en attente, `econoris-migrate` ne fait rien. On peut
 5. Démarrer uniquement la base avec ce dépôt :
 
     ```bash
-    docker compose up -d econoris-db
+    docker compose up -d econoris-database
     ```
 
-6. Marquer la migration de départ comme appliquée :
+6. Restaurer la sauvegarde :
 
     ```bash
-    docker compose exec econoris-db psql -U <DB_USER> -d <DB_NAME> -c "CREATE TABLE IF NOT EXISTS schema_migrations (version VARCHAR PRIMARY KEY); INSERT INTO schema_migrations (version) VALUES ('20261025120000');"
+    docker compose exec -T econoris-database psql -U <DB_USER> -d <DB_NAME> < backup.sql
     ```
 
-7. Vérifier que dbmate ne voit aucune migration en attente (`Pending: 0`) :
+7. Marquer la migration de départ comme appliquée :
+
+    ```bash
+    docker compose exec econoris-database psql -U <DB_USER> -d <DB_NAME> -c "CREATE TABLE IF NOT EXISTS schema_migrations (version VARCHAR PRIMARY KEY); INSERT INTO schema_migrations (version) VALUES ('20261025120000');"
+    ```
+
+8. Vérifier que dbmate ne voit aucune migration en attente (`Pending: 0`) :
 
     ```bash
     docker compose run --rm econoris-migrate --no-dump-schema status
     ```
 
-8. Démarrer le reste, puis le serveur :
+9. Démarrer le reste, puis le serveur :
 
     ```bash
     docker compose up -d

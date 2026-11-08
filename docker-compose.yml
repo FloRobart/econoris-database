@@ -1,46 +1,118 @@
+# Production only. The database is reachable only through the internal econoris-database-net network.
+
+x-hardened-service: &hardened-service
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      # Prevents the logs from filling the disk of the host
+      max-size: 10m
+      max-file: "3"
+
 services:
-  econoris-db:
-    image: postgres:18
+  econoris-database:
+    <<: *hardened-service
+    image: dhi.io/postgres:18@sha256:76d0081a2d938bff0b16af17136929549be9257f00c006f1b65af68b11e2c0e1
     restart: always
     environment:
-      POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:?DB_NAME must be set}
+      POSTGRES_USER: ${DB_USER:?DB_USER must be set}
+      # A file rather than a variable, so the password does not appear in docker inspect
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
     volumes:
       - db_data:/var/lib/postgresql
+    # The root filesystem is read-only: PostgreSQL only writes in the volume and in /tmp (its socket)
+    tmpfs:
+      - /tmp:uid=70,gid=70,mode=0700,noexec,nosuid,nodev,size=64m
     networks:
-      - econoris-net
-    security_opt:
-      - no-new-privileges:true
+      - econoris-database-net
+    mem_limit: ${DB_MEMORY_LIMIT:-1g}
+    pids_limit: 256
+    shm_size: 256m
+    # Leaves time for a clean shutdown, which avoids a crash recovery on the next start
+    stop_grace_period: 60s
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME} || exit 1"]
+      # Through TCP, because during its initialization PostgreSQL only listens on the socket
+      test: ["CMD", "pg_isready", "--host=127.0.0.1", "--username=${DB_USER}", "--dbname=${DB_NAME}"]
       interval: 5s
-      timeout: 30s
+      timeout: 5s
       retries: 5
+      start_period: 60s
 
-  # One-shot service: applies pending migrations, then exits
+  # One-shot service: applies the pending migrations, then exits
   econoris-migrate:
+    <<: *hardened-service
     image: florobart/econoris-migrations:${MIGRATIONS_VERSION:-latest}
-    restart: "no"
-    environment:
-      DATABASE_URL: postgres://${DB_USER}:${DB_PASSWORD}@econoris-db:5432/${DB_NAME}?sslmode=disable
+    secrets:
+      # dbmate reads ./.env by default, and the image working directory is /
+      - source: migrations_env
+        target: /.env
     depends_on:
-      econoris-db:
+      econoris-database:
         condition: service_healthy
     networks:
-      - econoris-net
-    user: "1800:1800"
-    read_only: true
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
+      - econoris-database-net
+    mem_limit: 128m
+    pids_limit: 32
+
+  # One-shot service, run after the migrations: gives the API its own role, which can only read and
+  # write the rows of the tables. A SQL injection in the API could then neither change the schema nor
+  # run code on the server, unlike with the owner of the database.
+  # Run on every deployment: the tables of new migrations are granted, and a new password written in
+  # its secret file is applied.
+  econoris-api-role:
+    <<: *hardened-service
+    # Same image as the database: it already contains psql
+    image: dhi.io/postgres:18@sha256:76d0081a2d938bff0b16af17136929549be9257f00c006f1b65af68b11e2c0e1
+    environment:
+      PGHOST: econoris-database
+      PGUSER: ${DB_USER:?DB_USER must be set}
+      PGDATABASE: ${DB_NAME:?DB_NAME must be set}
+    secrets:
+      - db_password
+      - api_role_password
+    # The passwords go through the environment of psql and its standard input: as command arguments,
+    # they would be visible in the process list. The table of the migrations stays out of reach of the API.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        PGPASSWORD="$$(cat /run/secrets/db_password)" psql --quiet --no-psqlrc -v ON_ERROR_STOP=1 <<SQL
+        SELECT 'CREATE ROLE econoris_api LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'econoris_api') \gexec
+        ALTER ROLE econoris_api PASSWORD '$$(cat /run/secrets/api_role_password)';
+        GRANT USAGE ON SCHEMA public TO econoris_api;
+        GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO econoris_api;
+        REVOKE ALL ON schema_migrations FROM econoris_api;
+        SQL
+    depends_on:
+      econoris-migrate:
+        condition: service_completed_successfully
+    networks:
+      - econoris-database-net
+    mem_limit: 128m
+    pids_limit: 32
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  migrations_env:
+    file: ./secrets/migrations.env
+  # Password of the role of the API, with letters and digits only, applied by econoris-api-role
+  api_role_password:
+    file: ./secrets/api_db_password
 
 volumes:
   db_data:
     name: ${DB_VOLUME_NAME:-econoris_db_data}
 
 networks:
-  econoris-net:
-    name: econoris-net
-    driver: bridge
+  # Same definition as in econoris-api: "name" makes both repositories join one network
+  econoris-database-net:
+    name: econoris-database-net
+    internal: true
