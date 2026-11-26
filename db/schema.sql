@@ -45,6 +45,46 @@ SET default_tablespace = '';
 SET default_table_access_method = heap;
 
 --
+-- Name: categories; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.categories (
+    id integer NOT NULL,
+    code character varying(100) NOT NULL,
+    label character varying(255) NOT NULL,
+    parent_id integer,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    search_keywords text[] DEFAULT '{}'::text[] NOT NULL,
+    CONSTRAINT check_category_not_its_own_parent CHECK ((parent_id <> id))
+);
+
+
+--
+-- Name: categories_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.categories ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.categories_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: legacy_category_labels; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.legacy_category_labels (
+    label character varying(255) NOT NULL,
+    category_id integer NOT NULL
+);
+
+
+--
 -- Name: loans; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -92,7 +132,8 @@ CREATE TABLE public.operations (
     user_id integer NOT NULL,
     subscription_id integer,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    category_id integer NOT NULL
 );
 
 
@@ -141,6 +182,7 @@ CREATE TABLE public.subscriptions (
     user_id integer NOT NULL,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    category_id integer NOT NULL,
     CONSTRAINT check_sub_dates_valid CHECK (((end_date IS NULL) OR (end_date >= start_date))),
     CONSTRAINT check_sub_day_of_month_range CHECK (((day_of_month IS NULL) OR (day_of_month = 0) OR ((day_of_month >= 1) AND (day_of_month <= 31)))),
     CONSTRAINT check_sub_day_required_for_months CHECK ((((interval_unit = 'months'::public.subscription_interval_unit) AND (day_of_month IS NOT NULL)) OR (interval_unit <> 'months'::public.subscription_interval_unit))),
@@ -194,6 +236,38 @@ ALTER TABLE public.work_hours ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
 
 
 --
+-- Name: categories categories_code_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.categories
+    ADD CONSTRAINT categories_code_unique UNIQUE (code);
+
+
+--
+-- Name: categories categories_label_unique_per_parent; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.categories
+    ADD CONSTRAINT categories_label_unique_per_parent UNIQUE NULLS NOT DISTINCT (parent_id, label);
+
+
+--
+-- Name: categories categories_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.categories
+    ADD CONSTRAINT categories_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: legacy_category_labels legacy_category_labels_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.legacy_category_labels
+    ADD CONSTRAINT legacy_category_labels_pkey PRIMARY KEY (label);
+
+
+--
 -- Name: loans loans_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -234,6 +308,13 @@ ALTER TABLE ONLY public.work_hours
 
 
 --
+-- Name: categories update_categories_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER update_categories_updated_at BEFORE UPDATE ON public.categories FOR EACH ROW EXECUTE FUNCTION public.update_updated_at();
+
+
+--
 -- Name: loans update_loans_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -262,11 +343,43 @@ CREATE TRIGGER update_work_hours_updated_at BEFORE UPDATE ON public.work_hours F
 
 
 --
+-- Name: categories categories_parent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.categories
+    ADD CONSTRAINT categories_parent_id_fkey FOREIGN KEY (parent_id) REFERENCES public.categories(id);
+
+
+--
+-- Name: legacy_category_labels legacy_category_labels_category_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.legacy_category_labels
+    ADD CONSTRAINT legacy_category_labels_category_id_fkey FOREIGN KEY (category_id) REFERENCES public.categories(id);
+
+
+--
+-- Name: operations operations_category_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.operations
+    ADD CONSTRAINT operations_category_id_fkey FOREIGN KEY (category_id) REFERENCES public.categories(id);
+
+
+--
 -- Name: operations subscription_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.operations
     ADD CONSTRAINT subscription_id_fkey FOREIGN KEY (subscription_id) REFERENCES public.subscriptions(id) ON DELETE SET NULL;
+
+
+--
+-- Name: subscriptions subscriptions_category_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.subscriptions
+    ADD CONSTRAINT subscriptions_category_id_fkey FOREIGN KEY (category_id) REFERENCES public.categories(id);
 
 
 --
@@ -281,4 +394,8 @@ ALTER TABLE ONLY public.operations
 --
 
 INSERT INTO public.schema_migrations (version) VALUES
-    ('20261025120000');
+    ('20261025120000'),
+    ('20261124234000'),
+    ('20261124234100'),
+    ('20261125100000'),
+    ('20261125120000');
